@@ -1,4 +1,5 @@
 import random
+import threading
 
 class BatteryMonitor:
     """Battery monitering module, simulates or reads real battery data."""
@@ -14,8 +15,18 @@ class BatteryMonitor:
         self._soh= 100.0
        #TODO: start monitoring thread
     
+    def _monitor_loop(self):
+        while True:
+            if self.source == "simulator":
+                self._simulate_data()
+            else:
+                self._read_from_bms()
+            threading.Event().wait(self.update_interval)
+
     def start_monitoring(self):
         """Start a background thread to update the battery data periodically."""
+        thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        thread.start()
 
     def get_status(self):
         """ Get the latest battery status.
