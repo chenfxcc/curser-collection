@@ -1,5 +1,8 @@
 import random
 import threading
+import os
+import csv
+from datetime import datetime
 
 class BatteryMonitor:
     """Battery monitering module, simulates or reads real battery data."""
@@ -22,7 +25,19 @@ class BatteryMonitor:
             else:
                 self._read_from_bms()
             threading.Event().wait(self.update_interval)
+    
 
+    def _log_data(self):
+        filename = "battery_log.csv"
+        with open(filename, mode="a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                datetime.now().isoformat(),
+                self._voltage,
+                self._soc,
+                self._soh,
+            ])
+            
     def start_monitoring(self):
         """Start a background thread to update the battery data periodically."""
         thread = threading.Thread(target=self._monitor_loop, daemon=True)
@@ -43,6 +58,11 @@ class BatteryMonitor:
         """Generate simulated battery data(internal use only)."""
 
         # 模拟逐渐降低的SOC (0-1% 随机下降), 保证在0-100间
+        # 检查并修正电压和SOC的下限
+        if self._voltage < 20:
+            self._voltage = 20.0
+        if self._soc < 0:
+            self._soc = 0.0
         soc_drop = random.uniform(0, 1)
         self._soc = max(0, self._soc - soc_drop)
 
@@ -57,7 +77,9 @@ class BatteryMonitor:
         self._soh = max(0, self._soh - 0.01)
 
         # 返回最新状态
+        self._log_data()
         return self._soc, self._voltage, self._soh
+        
         #TODO: implement
 
     def _read_from_bms(self):

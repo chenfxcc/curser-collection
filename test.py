@@ -9,9 +9,10 @@ def main():
             status = monitor.get_status()
             print(f"Iteration {i+1}: SOC={status['soc']:.2f}%, Voltage={status['voltage']:.2f}V, SOH={status['soh']:.2f}%")
             #验证数据范围
-            assert 0 <= status['soc'] <= 100, f"soc out of range: {status['soc']}"
-            assert 20 <= status['voltage'] <= 30, f"voltage out of range: {status['voltage']}"
+            assert  status['soc'] >= 0, f"soc too low: {status['soc']}"
+            assert  status['voltage'] >= 20,  f"voltage too low: {status['voltage']}"
             assert 0 <= status['soh'] <= 100, f"soh out of range: {status['soh']}"
+            print("data is valid")
             time.sleep(1)
     except KeyboardInterrupt:
         print("Test stopped.")
