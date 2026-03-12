@@ -1,0 +1,12 @@
+# Battery monitor config
+# source: simulator | BMS
+source: simulator
+update_interval: 0.1
+nominal_capacity_ah: 100.0
+ambient_temperature: 25.0 #想改温度值就改这里
+voltage_curve:
+  v_full: 25.2 #想改电压就改这里
+  v_plateau_hi: 24.7
+  v_plateau_lo: 24.4
+  v_empty: 22
+ 

@@ -1,6 +1,7 @@
 from battery import BatteryMonitor
 import time
 import random
+import argparse
 
 
 def _simulate_once_with_seed(monitor: BatteryMonitor, seed: int):
@@ -66,6 +67,9 @@ def main():
     test_low_temperature_soc_drops_faster()
     test_high_temperature_voltage_is_lower()
     print("Temperature tests passed.")
+
+    # Re-randomize for the live demo loop so each run differs
+    random.seed()
 
     monitor = BatteryMonitor(source="simulator", update_interval=1)
     monitor.start_monitoring()
