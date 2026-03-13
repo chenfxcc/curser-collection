@@ -252,7 +252,10 @@ class BatteryMonitor:
             # 限幅到合理范围，防止长期漂移到极端值
             self._temperature = max(-20.0, min(60.0, self._temperature))
 
-        base_soc_drop = random.uniform(0.0, 1.0)
+        # 按“每秒”放电速率来模拟，避免 update_interval 很小时 SOC 掉得过快
+        # base_soc_drop_per_sec 代表“每秒最多掉多少百分比”
+        base_soc_drop_per_sec = random.uniform(0.0, 1.0)
+        base_soc_drop = base_soc_drop_per_sec * max(dt, 0.001)
         # 温度对可用容量的影响（简化模型）
         # 低温(<10°C)：容量变小，表现为SOC下降稍快
         if self._temperature < 10.0:
@@ -340,4 +343,30 @@ class BatteryMonitor:
     def _read_from_bms(self):
         """Read real battery data from the BMS(placeholder)."""
         #TODO: implement
-        
+
+#天际一个主函数供客户进行交互，输入 s 查看当前状态， 输入 q 退出
+def main() -> None:
+    monitor = BatteryMonitor()
+    monitor.start_monitoring()
+    print("BatteryMonitor started. Type 's' to show status, 'q' to quit.")
+    try:
+        while True:
+            cmd = input("> ").strip().lower()
+            if cmd == "s":
+                status = monitor.get_status()
+                print(
+                    f"SOC={status['soc']:.2f}%, Voltage={status['voltage']:.2f}V, "
+                    f"SOH={status['soh']:.2f}%, Temp={status['temperature']:.1f}C"
+                )
+            elif cmd == "q":
+                break
+            elif cmd == "":
+                continue
+            else:
+                print("Unknown command. Type 's' (status) or 'q' (quit).")
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()
