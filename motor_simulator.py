@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 import time
-
+"""
+MotorSimulator class Design description:
+- main status: pwm_duty, direction, enabled are set through set_* methods
+- Algorithm Engine: _update_simulation(dt) calculate the speed, current, temperature through current status
+- Update rules:
+   *set mothod call _update_simulation(dt) immediately (immediate drive)
+   *backend periodic call through thread to update the status (time drive)
+- interface:get_status() return the current status
+"""
 
 class MotorSimulator:
     def __init__(self, name: str = "Motor"):
