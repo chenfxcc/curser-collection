@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import threading
 """
 MotorSimulator class Design description:
 - main status: pwm_duty, direction, enabled are set through set_* methods
@@ -28,6 +29,10 @@ class MotorSimulator:
         self.temperature = 25.0  # temperature 
         self.ambient_temperature = 25.0
         self._last_update_ts = time.monotonic()
+        self._last_update = time.time()
+        self._running = False
+        self._thread = None
+        self._lock = threading.Lock()
 
     def set_pwm(self, pwm_duty):
         """
@@ -41,8 +46,9 @@ class MotorSimulator:
         """
         if not (0 <= pwm_duty <= 100):
             raise ValueError(f"pwm_duty must be in range [0, 100], got {pwm_duty!r}")
-        self.pwm_duty = float(pwm_duty)
-        self._update_simulation(dt=0.0)
+        with self._lock:
+            self.pwm_duty = float(pwm_duty)
+            self._update_simulation(dt=0.0)
 
     def set_direction(self, direction):
         """
@@ -64,8 +70,9 @@ class MotorSimulator:
                 "direction must be one of 1 (forward), -1 (reverse), 0 (stop); "
                 f"got {direction!r}"
             )
-        self.direction = int(direction)
-        self._update_simulation(0)
+        with self._lock:
+            self.direction = int(direction)
+            self._update_simulation(0)
 
     def enable(self):
         """
@@ -74,8 +81,9 @@ class MotorSimulator:
         Sets ``self.enabled`` to ``True`` and refreshes simulation state
         without advancing the thermal time step (``dt=0``).
         """
-        self.enabled = True
-        self._update_simulation(0)
+        with self._lock:
+            self.enabled = True
+            self._update_simulation(0)
 
     def disable(self):
         """
@@ -84,8 +92,9 @@ class MotorSimulator:
         Sets ``self.enabled`` to ``False`` and refreshes simulation state
         without advancing the thermal time step (``dt=0``).
         """
-        self.enabled = False
-        self._update_simulation(0)
+        with self._lock:
+            self.enabled = False
+            self._update_simulation(0)
 
     def get_status(self):
         """
@@ -107,16 +116,70 @@ class MotorSimulator:
             - ``current`` (``float``): Simulated current (A).
             - ``temperature`` (``float``): Simulated temperature (°C).
         """
-        self._update_simulation()
-        return {
-            "name": str(self.name),
-            "enabled": bool(self.enabled),
-            "direction": int(self.direction),
-            "pwm_duty": int(self.pwm_duty),
-            "speed": float(self.speed),
-            "current": float(self.current),
-            "temperature": float(self.temperature),
-        }
+        with self._lock:
+            self._update_simulation()
+            return {
+                "name": str(self.name),
+                "enabled": bool(self.enabled),
+                "direction": int(self.direction),
+                "pwm_duty": float(self.pwm_duty),
+                "speed": float(self.speed),
+                "current": float(self.current),
+                "temperature": float(self.temperature),
+            }
+
+    def _monitor_loop(self, interval: float = 0.1):
+        """Background loop that periodically updates simulation state."""
+        while self._running:
+            now = time.time()
+            with self._lock:
+                dt = now - self._last_update
+                if dt < 0:
+                    dt = 0.0
+                self._update_simulation(dt)
+                self._last_update = now
+            time.sleep(interval)
+
+    def start_monitoring(self, interval: float = 0.1):
+        """
+        Start the background monitoring thread.
+
+        Args:
+            interval: Update period in seconds. Smaller values update faster
+                with higher CPU usage.
+        """
+        if interval <= 0:
+            raise ValueError(f"interval must be > 0, got {interval!r}")
+
+        with self._lock:
+            if self._running:
+                return
+            self._running = True
+            self._last_update = time.time()
+
+        self._thread = threading.Thread(
+            target=self._monitor_loop,
+            args=(float(interval),),
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop_monitoring(self, timeout: float | None = 2.0):
+        """
+        Stop the background monitoring thread safely.
+
+        Args:
+            timeout: Max seconds to wait for the thread to exit.
+        """
+        with self._lock:
+            self._running = False
+            thread = self._thread
+
+        if thread is not None:
+            thread.join(timeout=timeout)
+
+        with self._lock:
+            self._thread = None
     def _update_simulation(self, dt: float | None = None):
         """
         Update simulation status internally.
