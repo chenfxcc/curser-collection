@@ -36,14 +36,9 @@ def _set_stop(motor: MotorSimulator) -> None:
 def basic_function_test() -> MotorSimulator:
     print("=== 1) Basic function test ===")
 
-    # Requested: name="TestMotor", max_speed=1500
-    # If current class signature does not support max_speed, fallback gracefully.
-    try:
-        motor = MotorSimulator(name="TestMotor", max_speed=1500)
-    except TypeError:
-        motor = MotorSimulator(name="TestMotor")
-        # Keep a test-side attribute for visibility if class has no such constructor arg.
-        setattr(motor, "max_speed", 1500)
+    # 转速由 motor_config.yaml 的 max_speed 与 PWM 共同决定，勿在测试中覆盖 max_speed
+    motor = MotorSimulator(name="TestMotor")
+    print(f"(来自 motor_config.yaml) max_speed = {motor.max_speed}")
 
     _print_status("Initial", motor)
 

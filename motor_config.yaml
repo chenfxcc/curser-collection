@@ -1,0 +1,7 @@
+# Motor simulator configuration
+# max_speed: simulated RPM at 100% PWM (magnitude)
+# current_factor: scales load current vs normalized duty (0..100)
+# temp_rise_rate: heating °C per (A * s)
+max_speed: 100.0
+current_factor: 0.03
+temp_rise_rate: 0.15

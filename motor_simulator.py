@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import time
 import threading
+from typing import Any, Dict, Optional
 """
 MotorSimulator class Design description:
 - main status: pwm_duty, direction, enabled are set through set_* methods
@@ -21,6 +23,7 @@ class MotorSimulator:
             name: Human-readable motor identifier (exposed in :meth:`get_status`).
         """
         self.name = str(name)
+        self.load_config()
         self.enabled = False
         self.pwm_duty = 0.0  # PWM value 0-100
         self.direction = 0  # direction, 1=Forward rotration , -1=Reverse rotation , 0=stop
@@ -33,6 +36,111 @@ class MotorSimulator:
         self._running = False
         self._thread = None
         self._lock = threading.Lock()
+
+    def load_config(self, path: str | None = None) -> Dict[str, Any]:
+        """
+        Load simulator parameters from YAML.
+
+        Keys:
+
+        - ``max_speed``: Maximum simulated speed magnitude at 100% PWM (RPM scale).
+        - ``current_factor``: Multiplier for load-dependent current (see :meth:`_update_simulation`).
+        - ``temp_rise_rate``: Temperature rise per (ampere × second), °C/(A·s).
+
+        If the file is missing, a default file is created and defaults are used.
+
+        Args:
+            path: YAML file path. If ``None``, uses ``motor_config.yaml`` in the same
+                directory as this module (not the process current working directory),
+                so edits in the project folder always apply when you run scripts from elsewhere.
+
+        Returns:
+            The merged configuration dict actually applied.
+        """
+        if path is None:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "motor_config.yaml")
+
+        defaults: Dict[str, Any] = {
+            "max_speed": 100.0,
+            "current_factor": 0.03,
+            "temp_rise_rate": 0.15,
+        }
+        if not os.path.exists(path):
+            self._write_default_motor_config(path, defaults)
+            merged = dict(defaults)
+        else:
+            loaded = self._read_motor_config(path)
+            merged = dict(defaults)
+            if loaded:
+                for k in defaults:
+                    if k in loaded:
+                        merged[k] = loaded[k]
+
+        max_speed = float(merged["max_speed"])
+        current_factor = float(merged["current_factor"])
+        temp_rise_rate = float(merged["temp_rise_rate"])
+
+        if max_speed <= 0:
+            max_speed = float(defaults["max_speed"])
+        if current_factor < 0:
+            current_factor = float(defaults["current_factor"])
+        if temp_rise_rate < 0:
+            temp_rise_rate = float(defaults["temp_rise_rate"])
+
+        self.max_speed = max_speed
+        self.current_factor = current_factor
+        self.temp_rise_rate = temp_rise_rate
+
+        merged["max_speed"] = max_speed
+        merged["current_factor"] = current_factor
+        merged["temp_rise_rate"] = temp_rise_rate
+        return merged
+
+    def _write_default_motor_config(self, path: str, cfg: Dict[str, Any]) -> None:
+        content = (
+            "# Motor simulator configuration\n"
+            "# max_speed: simulated RPM at 100% PWM (magnitude)\n"
+            "# current_factor: scales load current vs normalized duty (0..100)\n"
+            "# temp_rise_rate: heating °C per (A * s)\n"
+            f"max_speed: {cfg['max_speed']}\n"
+            f"current_factor: {cfg['current_factor']}\n"
+            f"temp_rise_rate: {cfg['temp_rise_rate']}\n"
+        )
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+
+    def _read_motor_config(self, path: str) -> Optional[Dict[str, Any]]:
+        try:
+            import yaml  # type: ignore
+
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return self._simple_motor_yaml_load(path)
+
+    def _simple_motor_yaml_load(self, path: str) -> Optional[Dict[str, Any]]:
+        out: Dict[str, Any] = {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for raw in f:
+                    line = raw.split("#", 1)[0].strip()
+                    if not line or ":" not in line:
+                        continue
+                    k, v = line.split(":", 1)
+                    k, v = k.strip(), v.strip()
+                    if not k:
+                        continue
+                    try:
+                        if "." in v or "e" in v.lower():
+                            out[k] = float(v)
+                        else:
+                            out[k] = int(v)
+                    except ValueError:
+                        out[k] = v
+            return out
+        except OSError:
+            return None
 
     def set_pwm(self, pwm_duty):
         """
@@ -186,9 +294,9 @@ class MotorSimulator:
 
         Rules:
         - If not enabled or direction == 0 -> speed = 0
-        - Else speed = pwm_duty * direction_factor (forward:+, reverse:-)
-        - current increases with |speed|
-        - temperature rises slowly over time (with some cooling)
+        - Else speed = (pwm_duty/100) * max_speed * direction_factor (forward:+, reverse:-)
+        - current uses ``current_factor`` with load normalized by ``max_speed``
+        - temperature heating uses ``temp_rise_rate`` * current * dt (plus fixed cooling)
         """
         now = time.monotonic()
         if dt is None:
@@ -204,21 +312,21 @@ class MotorSimulator:
             self.speed = 0.0
         else:
             direction_factor = 1.0 if direction > 0 else -1.0
-            self.speed = float(self.pwm_duty) * direction_factor
+            pwm = float(self.pwm_duty)
+            self.speed = (pwm / 100.0) * float(self.max_speed) * direction_factor
 
         # Current (simple proportional model)
         # Use a small baseline while enabled (to mimic control electronics),
-        # and increase with load proportional to |speed|.
+        # and increase with load proportional to normalized duty (0..100).
         if enabled and direction != 0:
             base_current = 0.2
         else:
             base_current = 0.0
-        k_current = 0.03
-        self.current = base_current + k_current * abs(self.speed)
+        load_0_100 = abs(self.speed) / float(self.max_speed) * 100.0 if self.max_speed > 0 else 0.0
+        self.current = base_current + float(self.current_factor) * load_0_100
 
         # Temperature (slow heating + cooling to ambient)
-        heat_coeff = 0.15  # degC per (A*s)
-        cooling_coeff = 0.05  # 1/s
-        heat = heat_coeff * self.current * dt
+        cooling_coeff = 0.05  # 1/s (fixed; not in motor_config.yaml)
+        heat = float(self.temp_rise_rate) * self.current * dt
         cool = cooling_coeff * (self.temperature - self.ambient_temperature) * dt
         self.temperature = float(self.temperature + heat - cool)
