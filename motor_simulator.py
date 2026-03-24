@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 import threading
+from enum import Enum
 from typing import Any, Dict, Optional
 """
 MotorSimulator class Design description:
@@ -13,6 +14,16 @@ MotorSimulator class Design description:
    *backend periodic call through thread to update the status (time drive)
 - interface:get_status() return the current status
 """
+
+
+class MotorState(str, Enum):
+    """High-level motor state machine (operational + fault)."""
+
+    STOPPED = "STOPPED"
+    RUNNING_FORWARD = "RUNNING_FORWARD"
+    RUNNING_BACKWARD = "RUNNING_BACKWARD"
+    FAULT = "FAULT"
+
 
 class MotorSimulator:
     def __init__(self, name: str = "Motor"):
@@ -36,6 +47,34 @@ class MotorSimulator:
         self._running = False
         self._thread = None
         self._lock = threading.Lock()
+        self._state = MotorState.STOPPED
+
+    def _transition_state(self, new_state: MotorState, detail: str = "") -> None:
+        """Record state change and print a log line. Caller must hold ``self._lock``."""
+        if self._state == new_state:
+            return
+        old = self._state
+        self._state = new_state
+        msg = f"[MotorSimulator:{self.name}] state: {old.value} -> {new_state.value}"
+        if detail:
+            msg += f" | {detail}"
+        print(msg)
+
+    def _ensure_not_fault(self) -> None:
+        """Caller must hold ``self._lock``."""
+        if self._state == MotorState.FAULT:
+            raise RuntimeError("Motor in FAULT: operation not allowed; call fault_reset() first")
+
+    def _refresh_operational_state(self) -> None:
+        """Map ``enabled`` + ``direction`` to STOPPED / RUNNING_*. Caller must hold lock; not used in FAULT."""
+        if self._state == MotorState.FAULT:
+            return
+        if not self.enabled or self.direction == 0:
+            self._transition_state(MotorState.STOPPED, "disabled or direction stop")
+        elif self.direction == 1:
+            self._transition_state(MotorState.RUNNING_FORWARD, "forward")
+        else:
+            self._transition_state(MotorState.RUNNING_BACKWARD, "reverse")
 
     def load_config(self, path: str | None = None) -> Dict[str, Any]:
         """
@@ -151,10 +190,12 @@ class MotorSimulator:
 
         Raises:
             ValueError: If pwm_duty is outside [0, 100].
+            RuntimeError: If the motor is in ``FAULT``.
         """
         if not (0 <= pwm_duty <= 100):
             raise ValueError(f"pwm_duty must be in range [0, 100], got {pwm_duty!r}")
         with self._lock:
+            self._ensure_not_fault()
             self.pwm_duty = float(pwm_duty)
             self._update_simulation(dt=0.0)
 
@@ -167,6 +208,7 @@ class MotorSimulator:
 
         Raises:
             ValueError: If ``direction`` is not an integer in ``{1, -1, 0}``.
+            RuntimeError: If the motor is in ``FAULT`` (use :meth:`fault_reset` first).
         """
         if isinstance(direction, bool) or not isinstance(direction, int):
             raise ValueError(
@@ -179,7 +221,9 @@ class MotorSimulator:
                 f"got {direction!r}"
             )
         with self._lock:
+            self._ensure_not_fault()
             self.direction = int(direction)
+            self._refresh_operational_state()
             self._update_simulation(0)
 
     def enable(self):
@@ -188,9 +232,14 @@ class MotorSimulator:
 
         Sets ``self.enabled`` to ``True`` and refreshes simulation state
         without advancing the thermal time step (``dt=0``).
+
+        Raises:
+            RuntimeError: If the motor is in ``FAULT``.
         """
         with self._lock:
+            self._ensure_not_fault()
             self.enabled = True
+            self._refresh_operational_state()
             self._update_simulation(0)
 
     def disable(self):
@@ -199,10 +248,46 @@ class MotorSimulator:
 
         Sets ``self.enabled`` to ``False`` and refreshes simulation state
         without advancing the thermal time step (``dt=0``).
+
+        Raises:
+            RuntimeError: If the motor is in ``FAULT``.
         """
         with self._lock:
+            self._ensure_not_fault()
             self.enabled = False
+            self._refresh_operational_state()
             self._update_simulation(0)
+
+    def raise_fault(self, reason: str = "") -> None:
+        """
+        Enter ``FAULT`` (simulator / protection trip). Disables outputs and blocks
+        control until :meth:`fault_reset`.
+
+        Args:
+            reason: Optional text included in the state-change log.
+        """
+        with self._lock:
+            if self._state == MotorState.FAULT:
+                return
+            self.enabled = False
+            self.direction = 0
+            self._transition_state(MotorState.FAULT, detail=reason or "fault asserted")
+            self._update_simulation(0.0)
+
+    def fault_reset(self) -> None:
+        """
+        Leave ``FAULT`` and return to ``STOPPED`` (disabled, direction 0).
+
+        Raises:
+            ValueError: If not currently in ``FAULT``.
+        """
+        with self._lock:
+            if self._state != MotorState.FAULT:
+                raise ValueError("fault_reset only valid in FAULT state")
+            self.enabled = False
+            self.direction = 0
+            self._transition_state(MotorState.STOPPED, detail="fault cleared")
+            self._update_simulation(0.0)
 
     def get_status(self):
         """
@@ -223,6 +308,7 @@ class MotorSimulator:
             - ``speed`` (``float``): Simulated signed speed (0 if disabled/stopped).
             - ``current`` (``float``): Simulated current (A).
             - ``temperature`` (``float``): Simulated temperature (°C).
+            - ``state`` (``str``): ``MotorState`` value (``STOPPED``, ``RUNNING_FORWARD``, …).
         """
         with self._lock:
             self._update_simulation()
@@ -234,6 +320,7 @@ class MotorSimulator:
                 "speed": float(self.speed),
                 "current": float(self.current),
                 "temperature": float(self.temperature),
+                "state": self._state.value,
             }
 
     def _monitor_loop(self, interval: float = 0.1):
@@ -306,19 +393,24 @@ class MotorSimulator:
             dt = 0.0
 
         # Speed
-        enabled = bool(self.enabled)
-        direction = self.direction
-        if (not enabled) or direction == 0:
+        if self._state == MotorState.FAULT:
             self.speed = 0.0
         else:
-            direction_factor = 1.0 if direction > 0 else -1.0
-            pwm = float(self.pwm_duty)
-            self.speed = (pwm / 100.0) * float(self.max_speed) * direction_factor
+            enabled = bool(self.enabled)
+            direction = self.direction
+            if (not enabled) or direction == 0:
+                self.speed = 0.0
+            else:
+                direction_factor = 1.0 if direction > 0 else -1.0
+                pwm = float(self.pwm_duty)
+                self.speed = (pwm / 100.0) * float(self.max_speed) * direction_factor
 
         # Current (simple proportional model)
         # Use a small baseline while enabled (to mimic control electronics),
         # and increase with load proportional to normalized duty (0..100).
-        if enabled and direction != 0:
+        if self._state == MotorState.FAULT:
+            base_current = 0.0
+        elif bool(self.enabled) and self.direction != 0:
             base_current = 0.2
         else:
             base_current = 0.0
