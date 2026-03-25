@@ -109,7 +109,31 @@ def thread_safety_and_stop_test() -> None:
     print("Started daemon monitoring thread again; script will exit directly without stop_monitoring().")
 
 
+def stall_demo_test(motor: MotorSimulator) -> None:
+    """
+    堵转不会自动发生，必须调用 set_stall(True) 才会把 stall_blocked 置为 True。
+    本段演示：上电 + 有 PWM + 有方向 -> 堵转 -> 转速为 0、电流升高 -> 解除堵转。
+    """
+    print("\n=== 4) Stall simulation (set_stall) ===")
+    print("说明: stall_blocked 默认为 False；只有 motor.set_stall(True) 才会模拟堵转。")
+
+    motor.enable()
+    motor.set_pwm(70)
+    motor.set_direction(1)
+    _print_status("正常运行（未堵转）", motor)
+
+    motor.set_stall(True)
+    st = _print_status("set_stall(True) 之后（模拟的堵转情况发生， speed≈0, 电流明显变大）", motor)
+    assert st.get("stall_blocked") is True, "stall_blocked 应为 True"
+    assert abs(float(st.get("speed", 1))) < 1e-6, "堵转时转速应为 0"
+
+    motor.set_stall(False)
+    st2 = _print_status("set_stall(False) 解除堵转", motor)
+    assert st2.get("stall_blocked") is False, "stall_blocked 应为 False"
+
+
 if __name__ == "__main__":
     m = basic_function_test()
     monitoring_and_time_update_test(m)
     thread_safety_and_stop_test()
+    stall_demo_test(m)

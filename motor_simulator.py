@@ -25,6 +25,12 @@ class MotorState(str, Enum):
     FAULT = "FAULT"
 
 
+# 堵转时电流相对正常运行电流的倍数；温升在公式上再乘以此系数以加快发热
+_STALL_CURRENT_MULT = 5.0
+_STALL_HEAT_EXTRA_MULT = 2.0
+_OVERTEMP_FAULT_C = 80.0
+
+
 class MotorSimulator:
     def __init__(self, name: str = "Motor"):
         """
@@ -48,6 +54,7 @@ class MotorSimulator:
         self._thread = None
         self._lock = threading.Lock()
         self._state = MotorState.STOPPED
+        self._stall_blocked = False
 
     def _transition_state(self, new_state: MotorState, detail: str = "") -> None:
         """Record state change and print a log line. Caller must hold ``self._lock``."""
@@ -271,6 +278,7 @@ class MotorSimulator:
                 return
             self.enabled = False
             self.direction = 0
+            self._stall_blocked = False
             self._transition_state(MotorState.FAULT, detail=reason or "fault asserted")
             self._update_simulation(0.0)
 
@@ -287,6 +295,27 @@ class MotorSimulator:
             self.enabled = False
             self.direction = 0
             self._transition_state(MotorState.STOPPED, detail="fault cleared")
+            self._update_simulation(0.0)
+
+    def set_stall(self, blocked: bool) -> None:
+        """
+        Simulate mechanical stall (rotor blocked).
+
+        When ``blocked`` is True and the motor is energized with a non-zero
+        direction, ``speed`` is forced to 0 while ``current`` rises to about
+        ``_STALL_CURRENT_MULT`` × the normal running current; temperature rise
+        is additionally accelerated. Does nothing harmful when not energized.
+
+        Args:
+            blocked: Whether the rotor is mechanically blocked.
+
+        Raises:
+            RuntimeError: If ``blocked`` is True while in ``FAULT`` (clear fault first).
+        """
+        with self._lock:
+            if blocked:
+                self._ensure_not_fault()
+            self._stall_blocked = bool(blocked)
             self._update_simulation(0.0)
 
     def get_status(self):
@@ -309,6 +338,7 @@ class MotorSimulator:
             - ``current`` (``float``): Simulated current (A).
             - ``temperature`` (``float``): Simulated temperature (°C).
             - ``state`` (``str``): ``MotorState`` value (``STOPPED``, ``RUNNING_FORWARD``, …).
+            - ``stall_blocked`` (``bool``): Simulated mechanical blockage (see :meth:`set_stall`).
         """
         with self._lock:
             self._update_simulation()
@@ -321,6 +351,7 @@ class MotorSimulator:
                 "current": float(self.current),
                 "temperature": float(self.temperature),
                 "state": self._state.value,
+                "stall_blocked": bool(self._stall_blocked),
             }
 
     def _monitor_loop(self, interval: float = 0.1):
@@ -381,9 +412,10 @@ class MotorSimulator:
 
         Rules:
         - If not enabled or direction == 0 -> speed = 0
-        - Else speed = (pwm_duty/100) * max_speed * direction_factor (forward:+, reverse:-)
-        - current uses ``current_factor`` with load normalized by ``max_speed``
-        - temperature heating uses ``temp_rise_rate`` * current * dt (plus fixed cooling)
+        - Else speed = (pwm_duty/100) * max_speed * direction_factor (forward:+, reverse:-),
+          unless stall is active -> speed forced to 0
+        - current uses ``current_factor`` with load from PWM; stall ≈ ``_STALL_CURRENT_MULT`` × normal
+        - temperature: ``temp_rise_rate`` * current * dt, extra factor when stalled; if T > 80°C -> FAULT
         """
         now = time.monotonic()
         if dt is None:
@@ -392,33 +424,53 @@ class MotorSimulator:
         if dt < 0:
             dt = 0.0
 
+        enabled = bool(self.enabled)
+        direction = self.direction
+        pwm = float(self.pwm_duty)
+        energized_run = (
+            self._state != MotorState.FAULT and enabled and direction != 0
+        )
+        load_0_100 = pwm if self.max_speed > 0 else 0.0
+        normal_i = 0.0
+        if energized_run:
+            normal_i = 0.2 + float(self.current_factor) * load_0_100
+        stall_active = bool(self._stall_blocked) and energized_run
+
         # Speed
         if self._state == MotorState.FAULT:
             self.speed = 0.0
+        elif not energized_run:
+            self.speed = 0.0
+        elif stall_active:
+            self.speed = 0.0
         else:
-            enabled = bool(self.enabled)
-            direction = self.direction
-            if (not enabled) or direction == 0:
-                self.speed = 0.0
-            else:
-                direction_factor = 1.0 if direction > 0 else -1.0
-                pwm = float(self.pwm_duty)
-                self.speed = (pwm / 100.0) * float(self.max_speed) * direction_factor
+            direction_factor = 1.0 if direction > 0 else -1.0
+            self.speed = (pwm / 100.0) * float(self.max_speed) * direction_factor
 
-        # Current (simple proportional model)
-        # Use a small baseline while enabled (to mimic control electronics),
-        # and increase with load proportional to normalized duty (0..100).
+        # Current (stall: ~5× normal running current when energized)
         if self._state == MotorState.FAULT:
-            base_current = 0.0
-        elif bool(self.enabled) and self.direction != 0:
-            base_current = 0.2
+            self.current = 0.0
+        elif stall_active:
+            self.current = float(_STALL_CURRENT_MULT) * normal_i
+        elif energized_run:
+            self.current = normal_i
         else:
-            base_current = 0.0
-        load_0_100 = abs(self.speed) / float(self.max_speed) * 100.0 if self.max_speed > 0 else 0.0
-        self.current = base_current + float(self.current_factor) * load_0_100
+            self.current = 0.0
 
-        # Temperature (slow heating + cooling to ambient)
+        # Temperature (slow heating + cooling to ambient); faster rise when stalled
         cooling_coeff = 0.05  # 1/s (fixed; not in motor_config.yaml)
-        heat = float(self.temp_rise_rate) * self.current * dt
+        heat_mult = float(_STALL_HEAT_EXTRA_MULT) if stall_active else 1.0
+        heat = float(self.temp_rise_rate) * self.current * dt * heat_mult
         cool = cooling_coeff * (self.temperature - self.ambient_temperature) * dt
         self.temperature = float(self.temperature + heat - cool)
+
+        if self.temperature > _OVERTEMP_FAULT_C and self._state != MotorState.FAULT:
+            self.enabled = False
+            self.direction = 0
+            self._stall_blocked = False
+            self.speed = 0.0
+            self.current = 0.0
+            self._transition_state(
+                MotorState.FAULT,
+                detail=f"overtemperature > {_OVERTEMP_FAULT_C:g}°C",
+            )
