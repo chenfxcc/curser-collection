@@ -40,6 +40,14 @@ def basic_function_test() -> MotorSimulator:
     motor = MotorSimulator(name="TestMotor")
     print(f"(来自 motor_config.yaml) max_speed = {motor.max_speed}")
 
+    # 自动化断言：非法 PWM 应抛出异常
+    try:
+        motor.set_pwm(101)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("set_pwm(101) 应抛出 ValueError")
+
     _print_status("Initial", motor)
 
     motor.enable()
@@ -49,7 +57,8 @@ def basic_function_test() -> MotorSimulator:
     _print_status("After set_pwm(50)", motor)
 
     _set_forward(motor)
-    _print_status("After set_direction('forward')", motor)
+    st_forward = _print_status("After set_direction('forward')", motor)
+    assert float(st_forward["speed"]) > 0, "使能并设置方向且 PWM>0 时 speed 应大于 0"
 
     # Exception case requested by user
     try:
@@ -92,6 +101,7 @@ def monitoring_and_time_update_test(motor: MotorSimulator) -> None:
 
     motor.stop_monitoring()
     print("Background monitoring stopped.")
+    assert not motor.is_monitoring_thread_alive(), "stop_monitoring() 后后台线程应已结束"
 
 
 def thread_safety_and_stop_test() -> None:
@@ -102,6 +112,7 @@ def thread_safety_and_stop_test() -> None:
     motor.start_monitoring()
     motor.stop_monitoring()
     print("Immediate start->stop completed without errors.")
+    assert not motor.is_monitoring_thread_alive(), "stop_monitoring() 后后台线程应已结束"
 
     # Start again and exit without explicit stop:
     # daemon thread should exit automatically when main process exits.

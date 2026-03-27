@@ -3,8 +3,11 @@ from __future__ import annotations
 import os
 import time
 import threading
+from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Optional
+
+_MOTOR_LOG_LOCK = threading.Lock()
 """
 MotorSimulator class Design description:
 - main status: pwm_duty, direction, enabled are set through set_* methods
@@ -55,6 +58,18 @@ class MotorSimulator:
         self._lock = threading.Lock()
         self._state = MotorState.STOPPED
         self._stall_blocked = False
+        self._log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "motor.log")
+
+    def _motor_log(self, event: str, detail: str = "") -> None:
+        """Append one line to ``motor.log`` (next to this module) with a timestamp."""
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        line = f"{ts} [{self.name}] {event}"
+        if detail:
+            line += f" | {detail}"
+        line += "\n"
+        with _MOTOR_LOG_LOCK:
+            with open(self._log_path, "a", encoding="utf-8", newline="\n") as f:
+                f.write(line)
 
     def _transition_state(self, new_state: MotorState, detail: str = "") -> None:
         """Record state change and print a log line. Caller must hold ``self._lock``."""
@@ -66,6 +81,10 @@ class MotorSimulator:
         if detail:
             msg += f" | {detail}"
         print(msg)
+        log_detail = f"{old.value} -> {new_state.value}"
+        if detail:
+            log_detail += f" | {detail}"
+        self._motor_log("STATE", log_detail)
 
     def _ensure_not_fault(self) -> None:
         """Caller must hold ``self._lock``."""
@@ -203,7 +222,10 @@ class MotorSimulator:
             raise ValueError(f"pwm_duty must be in range [0, 100], got {pwm_duty!r}")
         with self._lock:
             self._ensure_not_fault()
+            old_pwm = float(self.pwm_duty)
             self.pwm_duty = float(pwm_duty)
+            if old_pwm != self.pwm_duty:
+                self._motor_log("PWM", f"{old_pwm} -> {self.pwm_duty}")
             self._update_simulation(dt=0.0)
 
     def set_direction(self, direction):
@@ -406,6 +428,12 @@ class MotorSimulator:
 
         with self._lock:
             self._thread = None
+
+    def is_monitoring_thread_alive(self) -> bool:
+        """Return ``True`` if the background monitoring thread exists and is still running."""
+        with self._lock:
+            th = self._thread
+        return th is not None and th.is_alive()
     def _update_simulation(self, dt: float | None = None):
         """
         Update simulation status internally.
