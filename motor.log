@@ -4,3 +4,9 @@
 2026-03-27 13:16:39.968 [TestMotor] STATE | RUNNING_FORWARD -> STOPPED | disabled or direction stop
 2026-03-27 13:16:42.092 [TestMotor] PWM | 80.0 -> 70.0
 2026-03-27 13:16:42.093 [TestMotor] STATE | STOPPED -> RUNNING_FORWARD | forward
+2026-04-01 14:42:29.506 [TestMotor] PWM | 0.0 -> 50.0
+2026-04-01 14:42:29.506 [TestMotor] STATE | STOPPED -> RUNNING_FORWARD | forward
+2026-04-01 14:42:29.508 [TestMotor] PWM | 50.0 -> 80.0
+2026-04-01 14:42:32.509 [TestMotor] STATE | RUNNING_FORWARD -> STOPPED | disabled or direction stop
+2026-04-01 14:42:34.635 [TestMotor] PWM | 80.0 -> 70.0
+2026-04-01 14:42:34.657 [TestMotor] STATE | STOPPED -> RUNNING_FORWARD | forward
