@@ -6,6 +6,9 @@ LoRa 通讯行为模拟器（框架占位）。
 
 from __future__ import annotations
 
+import json
+import threading
+import time
 from typing import Any, Callable, Optional
 
 
@@ -43,13 +46,17 @@ class LoRaSimulator:
         self.packet_header = packet_header if packet_header is not None else b"\xAA\x55"
 
         # ---- 内部队列与状态 ----
-        self.send_queue: list[bytes] = []  # 待发送的数据包（组帧后的或载荷，由实现约定）
+        self.send_queue: list[dict[str, Any]] = []  # 待发送任务队列（载荷、ACK需求、重试次数）
         self.recv_queue: list[bytes] = []  # 接收到的原始链路层字节，待解析
         self.running = False  # 后台工作线程运行标志；True 表示应尝试拉队列/周期任务
         self.receive_callback: Optional[Callable[[Any], None]] = (
             None  # on_receive 注册的回调；解析成功后调用
         )
         self.periodic_task: Optional[Any] = None  # 周期上报任务配置（内容、间隔等，由 set_periodic 填充）
+        self._send_thread: Optional[threading.Thread] = None
+        self._pending_acks: dict[Any, threading.Event] = {}
+        self._ack_lock = threading.Lock()
+        self._packet_seq = 0
 
     def configure(self, **kwargs: Any) -> None:
         """
@@ -95,32 +102,123 @@ class LoRaSimulator:
     # 发送相关
     # -------------------------------------------------------------------------
 
-    def send_data(self, payload: bytes) -> None:
+    def send_data(self, data: Any, need_ack: bool = True) -> None:
         """
         外部调用：将待发送数据放入发送队列（非阻塞）；实际发送由内部工作线程处理。
 
         Args:
-            payload: 应用层待发送的原始字节。
+            data: 待发送数据，支持 str 或 dict。
+            need_ack: 是否需要等待 ACK。
         """
-        pass
+        # 统一将业务数据转为 JSON 字符串，再编码为 UTF-8 字节。
+        if isinstance(data, str):
+            payload_json = json.dumps({"data": data}, ensure_ascii=False)
+        elif isinstance(data, dict):
+            payload_json = json.dumps(data, ensure_ascii=False)
+        else:
+            raise TypeError("data must be str or dict")
+
+        task = {
+            "data_bytes": payload_json.encode("utf-8"),
+            "need_ack": bool(need_ack),
+            "retries": 0,
+        }
+
+        # 记录入队前状态，若此前为空且已在运行，触发发送线程处理。
+        queue_was_empty = len(self.send_queue) == 0
+        self.send_queue.append(task)
+
+        # 若尚未启动，则进行懒启动，保证发送闭环可直接工作。
+        if not self.running:
+            self.running = True
+
+        if queue_was_empty and (
+            self._send_thread is None or not self._send_thread.is_alive()
+        ):
+            self._send_thread = threading.Thread(
+                target=self._process_send_queue,
+                name="lora-send-worker",
+                daemon=True,
+            )
+            self._send_thread.start()
 
     def _process_send_queue(self) -> None:
         """
         内部：从发送队列取包，调用组包/发送/等待 ACK，根据策略重试或丢弃。
         """
-        pass
+        while self.running:
+            if not self.send_queue:
+                time.sleep(0.1)
+                continue
 
-    def _send_packet(self, packet: bytes) -> None:
+            task = self.send_queue[0]
+            ok = self._send_packet(task["data_bytes"], task["need_ack"], task["retries"])
+            if ok:
+                # 成功发送并（如需要）收到 ACK，移除当前任务。
+                self.send_queue.pop(0)
+            else:
+                # 发送失败或 ACK 超时：增加重试计数，超过阈值则丢弃。
+                task["retries"] += 1
+                if task["retries"] >= self.max_retries:
+                    print(
+                        f"[LoRa] drop packet after retries={task['retries']} "
+                        f"(max={self.max_retries})"
+                    )
+                    self.send_queue.pop(0)
+
+            # 短暂休眠，避免空转占用 CPU。
+            time.sleep(0.1)
+
+    def _send_packet(self, raw_bytes: bytes, need_ack: bool, retries: int) -> bool:
         """
         内部：模拟射频发送一帧（可对接 inject_received_packet 侧的对端模拟）。
         """
-        pass
+        # 使用单字节密钥进行按字节 XOR 加密。
+        key = self.encryption_key[0] if self.encryption_key else 0x00
+        encrypted = bytes((b ^ key) for b in raw_bytes)
 
-    def _wait_for_ack(self) -> None:
+        # 组包：header(2) + length(1) + payload + checksum(1)
+        header = self.packet_header
+        length = bytes([len(encrypted)])
+        body = header + length + encrypted
+        checksum = 0
+        for b in body:
+            checksum ^= b
+        packet = body + bytes([checksum])
+
+        print(
+            f"[LoRa] sending packet(len={len(packet)}), "
+            f"need_ack={need_ack}, retries={retries}"
+        )
+
+        if not need_ack:
+            return True
+
+        # 使用自增序号作为 packet_id，等待接收侧后续填充 ACK 触发事件。
+        self._packet_seq += 1
+        packet_id = self._packet_seq
+        return self._wait_for_ack(packet_id)
+
+    def _wait_for_ack(self, packet_id: Any, timeout: Optional[float] = None) -> bool:
         """
         内部：在 ack_timeout_s 内等待对端 ACK；超时则触发重试逻辑（由调用方协调）。
         """
-        pass
+        ack_timeout = self.ack_timeout_s if timeout is None else float(timeout)
+        event = threading.Event()
+
+        # 在等待前登记 ACK 事件，供接收线程在解析到 ACK 包后 set()。
+        with self._ack_lock:
+            self._pending_acks[packet_id] = event
+
+        try:
+            received = event.wait(ack_timeout)
+            if not received:
+                print(f"[LoRa] ACK timeout for packet_id={packet_id}")
+            return received
+        finally:
+            # 无论成功/超时都清理，避免 pending 表增长。
+            with self._ack_lock:
+                self._pending_acks.pop(packet_id, None)
 
     # -------------------------------------------------------------------------
     # 接收相关
