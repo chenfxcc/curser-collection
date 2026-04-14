@@ -228,7 +228,20 @@ class LoRaSimulator:
         """
         内部：处理接收队列中的原始帧：解包、校验、必要时解密，再分发或自动回复。
         """
-        pass
+        # 持续轮询接收队列；由 self.running 控制退出。
+        while self.running:
+            if self.recv_queue:
+                packet_bytes = self.recv_queue.pop(0)
+                data = self._parse_packet(packet_bytes)
+                if data is None:
+                    print(f"[LoRa] Invalid packet: {packet_bytes!r}")
+                else:
+                    self._auto_reply(data)
+                    if self.receive_callback is not None:
+                        self.receive_callback(data)
+
+            # 小睡避免空转导致 CPU 占用过高。
+            time.sleep(0.01)
 
     def _parse_packet(self, raw: bytes) -> Optional[Any]:
         """
@@ -240,13 +253,67 @@ class LoRaSimulator:
         Returns:
             解析后的对象或载荷；无效包返回 None（具体类型由实现约定）。
         """
-        pass
+        # 至少包含 header(2) + len(1) + checksum(1)。
+        if len(raw) < 4:
+            return None
+
+        # 包头校验。
+        if raw[:2] != self.packet_header:
+            return None
+
+        payload_len = raw[2]
+        expected_len = 2 + 1 + payload_len + 1
+        if len(raw) != expected_len:
+            return None
+
+        encrypted_payload = raw[3 : 3 + payload_len]
+        received_checksum = raw[-1]
+
+        # 对 header + len + payload 做异或校验。
+        calc_checksum = 0
+        for b in raw[:-1]:
+            calc_checksum ^= b
+        if calc_checksum != received_checksum:
+            return None
+
+        # 采用单字节密钥做 XOR 解密。
+        key = self.encryption_key[0] if self.encryption_key else 0x00
+        decrypted_bytes = bytes((b ^ key) for b in encrypted_payload)
+
+        # 优先按 UTF-8 文本解析；若是 JSON 则转换为 Python 对象。
+        try:
+            text = decrypted_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            return decrypted_bytes
+
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
 
     def _auto_reply(self, parsed: Any) -> None:
         """
         内部：根据解析结果决定是否需要自动 ACK 或其它固定响应（不经过用户回调时）。
         """
-        pass
+        reply_data: Optional[Any] = None
+
+        if isinstance(parsed, dict) and "cmd" in parsed:
+            cmd = parsed.get("cmd")
+            if cmd == "Ping":
+                reply_data = {"res": "pong"}
+            elif cmd == "get_status":
+                reply_data = {"battery": 85, "motor": 0}
+            else:
+                reply_data = {"error": "unknow cmd"}
+        elif isinstance(parsed, str) and parsed == "PING":
+            reply_data = "PONG"
+
+        if reply_data is None:
+            print(f"[LoRa] No auto-reply rule matched for: {parsed!r}")
+            return
+
+        print(f"[LoRa] Auto reply: {reply_data!r}")
+        self.send_data(reply_data, need_ack=False)
 
     def on_receive(self, callback: Callable[[Any], None]) -> None:
         """
@@ -255,7 +322,8 @@ class LoRaSimulator:
         Args:
             callback: 接收处理函数，参数一般为解析后的载荷或消息对象。
         """
-        pass
+        # 仅保存回调引用；解析成功时由接收线程调用。
+        self.receive_callback = callback
 
     # -------------------------------------------------------------------------
     # 周期上报
