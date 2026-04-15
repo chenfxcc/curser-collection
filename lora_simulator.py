@@ -54,6 +54,8 @@ class LoRaSimulator:
         )
         self.periodic_task: Optional[Any] = None  # 周期上报任务配置（内容、间隔等，由 set_periodic 填充）
         self._send_thread: Optional[threading.Thread] = None
+        self._recv_thread: Optional[threading.Thread] = None
+        self._periodic_thread: Optional[threading.Thread] = None
         self._pending_acks: dict[Any, threading.Event] = {}
         self._ack_lock = threading.Lock()
         self._packet_seq = 0
@@ -329,21 +331,50 @@ class LoRaSimulator:
     # 周期上报
     # -------------------------------------------------------------------------
 
-    def set_periodic_report(self, content: bytes, interval_s: Optional[float] = None) -> None:
+    def set_periodic_report(self, cmd: Any, interval: Optional[float] = None) -> None:
         """
-        设置周期上报的内容与可选的新间隔；若 interval_s 为 None 则沿用当前周期配置。
+        设置周期上报任务：保存上报内容与间隔；传入无效参数时清除任务。
 
         Args:
-            content: 周期性上报的负载字节。
-            interval_s: 覆盖全局周期间隔（秒）；None 表示不改变当前间隔。
+            cmd: 周期上报内容，支持 str 或 dict。
+            interval: 周期间隔（秒）；None 时使用 self.periodic_interval_s。
         """
-        pass
+        interval_value = (
+            float(self.periodic_interval_s) if interval is None else float(interval)
+        )
+
+        if cmd is None or interval_value <= 0:
+            self.periodic_task = None
+            print("[LoRa] periodic report task cleared")
+            return
+
+        if not isinstance(cmd, (str, dict)):
+            raise TypeError("cmd must be str or dict")
+
+        self.periodic_task = {"cmd": cmd, "interval": interval_value}
+        print(
+            f"[LoRa] periodic report task set: cmd={cmd!r}, "
+            f"interval={interval_value}s"
+        )
 
     def _periodic_report_loop(self) -> None:
         """
         内部：在独立循环中按间隔将周期内容入队或发送，直至线程停止标志置位。
         """
-        pass
+        while self.running:
+            # 没有配置周期任务时短暂休眠，避免空转占用 CPU。
+            if self.periodic_task is None:
+                time.sleep(0.1)
+                continue
+
+            cmd = self.periodic_task.get("cmd")
+            interval = float(self.periodic_task.get("interval", self.periodic_interval_s))
+
+            # 按配置周期发送上报数据，不等待 ACK。
+            self.send_data(cmd, need_ack=False)
+
+            # 休眠一个周期后继续；醒来后由 while 条件再次检查 running。
+            time.sleep(interval)
 
     # -------------------------------------------------------------------------
     # 线程管理
@@ -351,21 +382,55 @@ class LoRaSimulator:
 
     def start(self) -> None:
         """启动后台工作线程（发送队列处理、接收队列处理、周期上报等，具体拆分由实现决定）。"""
-        pass
+        self.running = True
+
+        # 发送线程：处理发送队列并完成重试/ACK 等逻辑。
+        self._send_thread = threading.Thread(
+            target=self._process_send_queue,
+            daemon=True,
+        )
+        # 接收线程：轮询接收队列并解析/回调。
+        self._recv_thread = threading.Thread(
+            target=self._process_recv_queue,
+            daemon=True,
+        )
+        # 周期线程：按周期触发上报任务。
+        self._periodic_thread = threading.Thread(
+            target=self._periodic_report_loop,
+            daemon=True,
+        )
+
+        self._send_thread.start()
+        self._recv_thread.start()
+        self._periodic_thread.start()
 
     def stop(self) -> None:
         """请求停止所有后台线程并等待其退出（超时策略由实现定义）。"""
-        pass
+        self.running = False
+
+        # 等待后台线程在超时内退出，避免主线程长时间阻塞。
+        for thread_obj in (self._send_thread, self._recv_thread, self._periodic_thread):
+            if thread_obj is not None and thread_obj.is_alive():
+                thread_obj.join(timeout=2)
+
+        # 清空队列，避免停止后仍残留旧任务影响下次启动。
+        self.send_queue.clear()
+        self.recv_queue.clear()
 
     # -------------------------------------------------------------------------
     # 测试辅助
     # -------------------------------------------------------------------------
 
-    def inject_received_packet(self, raw: bytes) -> None:
+    def inject_received_packet(self, packet_bytes: bytes) -> None:
         """
-        测试/联调用：模拟从“空中”收到一帧 raw 数据，等价于写入接收队列或触发接收路径。
+        测试辅助：模拟从外部接收到一个完整原始数据包，仅注入接收队列，不做解析处理。
 
         Args:
-            raw: 模拟接收到的完整链路层帧字节。
+            packet_bytes: 模拟接收到的完整链路层帧字节串。
         """
-        pass
+        if not isinstance(packet_bytes, bytes):
+            raise TypeError("packet_bytes must be bytes")
+
+        # 仅做注入：把外部提供的原始包直接压入接收队列，后续由接收线程统一处理。
+        self.recv_queue.append(packet_bytes)
+        print(f"[LoRa] Injected packet(len={len(packet_bytes)})")
