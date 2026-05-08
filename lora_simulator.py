@@ -7,16 +7,19 @@ LoRa 通讯行为模拟器（框架占位）。
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from typing import Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class LoRaSimulator:
     """
     模拟 LoRa 链路层行为：发送队列、ACK、加解密、周期上报、接收回调等。
 
-    配置项包括：周期性上报间隔、ACK 超时、最大重试次数、加密密钥、数据包头等；
+    配置项包括：周期性上报间隔、ACK 超时、最大重试次数、加密密钥、数据包头、发送队列上限等；
     内部维护发送/接收队列及线程运行标志。
     """
 
@@ -27,6 +30,8 @@ class LoRaSimulator:
         max_retries: int = 3,
         encryption_key: Optional[bytes] = None,
         packet_header: Optional[bytes] = None,
+        max_queue_size: Optional[int] = None,
+        auto_start_send_worker: bool = True,
     ) -> None:
         """
         初始化模拟器：保存配置参数，创建发送/接收队列，初始化线程与停止标志。
@@ -37,6 +42,9 @@ class LoRaSimulator:
             max_retries: 单包最大重传次数，默认 3。
             encryption_key: 对称加密密钥占位；为 None 时使用单字节 0x5A。
             packet_header: 固定或前缀包头字节占位；为 None 时使用 b'\\xAA\\x55'。
+            max_queue_size: 发送队列最大长度；为 None 时不限制。达到上限后新的 send_data 将被丢弃并记日志。
+            auto_start_send_worker: 为 True（默认）时，首次 send_data 会置 running 并懒启动发送线程；
+                为 False 时仅入队，需调用 start() 后由统一后台线程处理（供测试等保证队列不被提前消费）。
         """
         # ---- 可配置链路参数（供周期上报、重传与加解密等后续逻辑使用）----
         self.periodic_interval_s = float(periodic_interval_s)
@@ -44,6 +52,10 @@ class LoRaSimulator:
         self.max_retries = int(max_retries)
         self.encryption_key = encryption_key if encryption_key is not None else b"\x5A"
         self.packet_header = packet_header if packet_header is not None else b"\xAA\x55"
+        self.max_queue_size = (
+            None if max_queue_size is None else int(max_queue_size)
+        )
+        self.auto_start_send_worker = bool(auto_start_send_worker)
 
         # ---- 内部队列与状态 ----
         self.send_queue: list[dict[str, Any]] = []  # 待发送任务队列（载荷、ACK需求、重试次数）
@@ -67,7 +79,7 @@ class LoRaSimulator:
         Args:
             **kwargs: 仅识别以下键，其余键静默忽略：
                 periodic_interval_s, ack_timeout_s, max_retries,
-                encryption_key, packet_header。
+                encryption_key, packet_header, max_queue_size, auto_start_send_worker。
         """
         # 白名单：只处理这些键，防止 **kwargs 中的无关项污染实例属性。
         allowed = frozenset(
@@ -77,6 +89,8 @@ class LoRaSimulator:
                 "max_retries",
                 "encryption_key",
                 "packet_header",
+                "max_queue_size",
+                "auto_start_send_worker",
             }
         )
 
@@ -99,6 +113,11 @@ class LoRaSimulator:
             elif name == "packet_header":
                 # 包头 / 前缀占位（字节）
                 self.packet_header = value
+            elif name == "max_queue_size":
+                # 发送队列上限；None 表示不限制
+                self.max_queue_size = None if value is None else int(value)
+            elif name == "auto_start_send_worker":
+                self.auto_start_send_worker = bool(value)
 
     # -------------------------------------------------------------------------
     # 发送相关
@@ -126,9 +145,23 @@ class LoRaSimulator:
             "retries": 0,
         }
 
+        if (
+            self.max_queue_size is not None
+            and len(self.send_queue) >= self.max_queue_size
+        ):
+            logger.warning(
+                "send_queue full (current=%d, max=%d); dropping new packet",
+                len(self.send_queue),
+                self.max_queue_size,
+            )
+            return
+
         # 记录入队前状态，若此前为空且已在运行，触发发送线程处理。
         queue_was_empty = len(self.send_queue) == 0
         self.send_queue.append(task)
+
+        if not self.auto_start_send_worker:
+            return
 
         # 若尚未启动，则进行懒启动，保证发送闭环可直接工作。
         if not self.running:

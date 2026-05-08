@@ -6,11 +6,14 @@ LoRaSimulator 功能测试脚本。
 2) 验证接收能力（inject_received_packet 注入完整协议包并解析）。
 3) 验证周期上报能力（电池状态周期上报 + 报警信息独立周期线程）。
 4) 验证回调能力（接收回调中打印数据并模拟执行电机动作）。
+5) 验证发送队列 max_queue_size：pytest 用例使用 auto_start_send_worker=False 避免懒启动线程排空队列；
+   脚本运行时可随机突发入队，部分报文被丢弃并由 logging 输出 WARNING（非 AssertionError）。
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import random
 import threading
 import time
@@ -92,7 +95,73 @@ def on_receive(data: Any) -> None:
             print(f"[IN <-][执行] 电机正转，速度{speed}")
 
 
+def test_send_queue_drops_when_at_max_from_init() -> None:
+    """构造参数 max_queue_size：队列满后多出的 send_data 不应入队。"""
+    sim = LoRaSimulator(max_queue_size=2, auto_start_send_worker=False)
+    sim.send_data({"id": 1}, need_ack=False)
+    sim.send_data({"id": 2}, need_ack=False)
+    assert len(sim.send_queue) == 2
+    sim.send_data({"id": 3}, need_ack=False)
+    assert len(sim.send_queue) == 2
+    first = json.loads(sim.send_queue[0]["data_bytes"].decode("utf-8"))
+    second = json.loads(sim.send_queue[1]["data_bytes"].decode("utf-8"))
+    assert first == {"id": 1}
+    assert second == {"id": 2}
+
+
+def test_send_queue_drops_when_at_max_from_configure() -> None:
+    """运行时 configure(max_queue_size=...) 与构造参数行为一致。"""
+    sim = LoRaSimulator(auto_start_send_worker=False)
+    sim.configure(max_queue_size=1)
+    sim.send_data({"k": "a"}, need_ack=False)
+    sim.send_data({"k": "b"}, need_ack=False)
+    assert len(sim.send_queue) == 1
+    only = json.loads(sim.send_queue[0]["data_bytes"].decode("utf-8"))
+    assert only == {"k": "a"}
+
+
+def test_send_queue_unlimited_when_max_queue_size_none() -> None:
+    """默认 max_queue_size 为 None 时不限制队列长度。"""
+    sim = LoRaSimulator(auto_start_send_worker=False)
+    assert sim.max_queue_size is None
+    for i in range(20):
+        sim.send_data({"seq": i}, need_ack=False)
+    assert len(sim.send_queue) == 20
+
+
+def demo_random_send_queue_overflow(
+    sim: LoRaSimulator,
+    stop_event: threading.Event,
+    max_queue_size: int,
+) -> None:
+    """
+    在后台随机休眠后决定：多数时候单条入队，小概率一次突发多条。
+    突发时发送条数大于 max_queue_size，队列满后由模拟器记 WARNING 并丢弃，不抛异常。
+    """
+    burst_id = 0
+    while not stop_event.is_set():
+        if stop_event.wait(timeout=random.uniform(0.4, 1.8)):
+            break
+        if random.random() < 0.35:
+            burst_id += 1
+            extra = random.randint(1, 8)
+            n = max_queue_size + extra
+            log_sys(
+                f"随机突发入队 {n} 条（队列上限={max_queue_size}，预期约 {extra} 条被丢弃，见 WARNING 日志）"
+            )
+            for i in range(n):
+                sim.send_data({"burst_id": burst_id, "seq": i}, need_ack=False)
+        else:
+            sim.send_data({"burst_id": None, "tick": time.time()}, need_ack=False)
+            log_sys("正常单条入队（未触发突发）")
+
+
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(levelname)s %(name)s %(message)s",
+    )
+
     # ---------------------------------------------------------------------
     # 1) 创建模拟器实例并配置参数
     # ---------------------------------------------------------------------
@@ -100,9 +169,17 @@ if __name__ == "__main__":
         periodic_interval_s=15.0,  # 默认周期上报间隔（场景要求 15s）
         ack_timeout_s=0.5,
         max_retries=3,
+        max_queue_size=5,
     )
     sim.configure(packet_header=b"\xAA\x55")
 
+    burst_stop = threading.Event()
+    burst_thread = threading.Thread(
+        target=demo_random_send_queue_overflow,
+        args=(sim, burst_stop, sim.max_queue_size or 5),
+        name="lora-burst-demo",
+        daemon=True,
+    )
     # ---------------------------------------------------------------------
     # 2) 注册接收回调：打印数据 + 模拟电机执行
     # ---------------------------------------------------------------------
@@ -113,6 +190,8 @@ if __name__ == "__main__":
     # ---------------------------------------------------------------------
     sim.start()
     log_sys("LoRaSimulator 已启动")
+    burst_thread.start()
+    log_sys("已启动发送队列随机突发演示线程（多数单条入队，小概率突发导致满队列丢弃）")
 
     # ---------------------------------------------------------------------
     # 4) 设置周期上报任务
@@ -170,8 +249,12 @@ if __name__ == "__main__":
     time.sleep(run_seconds)
 
     # ---------------------------------------------------------------------
-    # 8) 停止测试：先停报警线程，再停止模拟器
+    # 8) 停止测试：先停演示/报警线程，再停止模拟器
     # ---------------------------------------------------------------------
+    burst_stop.set()
+    if burst_thread.is_alive():
+        burst_thread.join(timeout=2)
+
     alarm_stop_event.set()
     if alarm_thread.is_alive():
         alarm_thread.join(timeout=2)
