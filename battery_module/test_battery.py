@@ -1,4 +1,4 @@
-from battery import BatteryMonitor
+from battery_simulator import BatteryMonitor
 import time
 import random
 import argparse
