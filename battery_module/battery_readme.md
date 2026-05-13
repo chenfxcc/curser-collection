@@ -4,7 +4,8 @@
 - `battery.py` —— 电池监控主模块，包含 BatteryMonitor 类，可模拟或读取真实电池数据。
 - `test.py` —— 用于测试 BatteryMonitor 的功能，包含基本数据验证和终端输出。
 - `battery_log.csv` —— 电池状态自动记录的CSV日志（自动生成）。
-- `analyze.py` —— 简单数据分析示例，计算平均电压。
+- `battery_ui.py` ——
+- `battery_config.yaml` ——
 
 
 
@@ -52,16 +53,10 @@
 1. 运行电池监控测试：
 
 ```bash
-python test.py
+python test_battery.py
 ```
 运行期间将输出10轮电池状态。
 
 2. 如需查看或分析日志数据，可直接用 Excel 或文本编辑器打开 `battery_log.csv`。
-
-3. 用 `analyze.py` 进行数据分析：
-
-```bash
-python analyze.py
-```
 
 

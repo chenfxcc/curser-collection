@@ -41,10 +41,13 @@ class BatteryMonitor:
         # 告警状态（用于抑制重复打印）
         self._alarm_low_voltage_active = False
         self._alarm_low_battery_active = False
+
+        self._stop_requested = False
+        self._monitor_thread: Optional[threading.Thread] = None
        #TODO: start monitoring thread
     
     def _monitor_loop(self):
-        while True:
+        while not self._stop_requested:
             if self.source == "simulator":
                 self._simulate_data()
             else:
@@ -203,8 +206,20 @@ class BatteryMonitor:
             
     def start_monitoring(self):
         """Start a background thread to update the battery data periodically."""
-        thread = threading.Thread(target=self._monitor_loop, daemon=True)
-        thread.start()
+        self._stop_requested = False
+        self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self._monitor_thread.start()
+
+    def stop_monitoring(self, join_timeout: Optional[float] = None) -> None:
+        """Signal the monitor loop to stop and wait for the background thread to exit."""
+        self._stop_requested = True
+        t = self._monitor_thread
+        if t is not None and t.is_alive():
+            timeout = join_timeout
+            if timeout is None:
+                interval = float(self.update_interval) if self.update_interval else 0.1
+                timeout = max(interval, 0.1) + 1.0
+            t.join(timeout=timeout)
 
     def _check_alarms(self) -> None:
         low_voltage = self._voltage < 21

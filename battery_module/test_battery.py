@@ -9,6 +9,14 @@ def _simulate_once_with_seed(monitor: BatteryMonitor, seed: int):
     return monitor._simulate_data()
 
 
+def _sync_remaining_ah_to_soc(monitor: BatteryMonitor) -> None:
+    """Align Ah model with current _soc so _simulate_data does not overwrite SOC from stale charge."""
+    eff = monitor._nominal_capacity_ah * (monitor._soh / 100.0)
+    monitor._remaining_capacity_ah = max(
+        0.0, min(eff, eff * (float(monitor._soc) / 100.0))
+    )
+
+
 def test_temperature_default_in_status():
     m = BatteryMonitor(source="simulator")
     status = m.get_status()
@@ -29,11 +37,17 @@ def test_temperature_changes_over_time():
 
 
 def test_low_temperature_soc_drops_faster():
-    # Same seed => same base soc_drop; low temp should scale it up
-    warm = BatteryMonitor(source="simulator", update_interval=0)
-    cold = BatteryMonitor(source="simulator", update_interval=0)
+    # Same seed => same base soc_drop; low temp should scale it up.
+    # Need a positive update_interval so per-step SOC change is not dominated by max(dt, 0.001).
+    # load_config() overwrites update_interval from config.yaml — set again after init for this test.
+    warm = BatteryMonitor(source="simulator", update_interval=1.0)
+    cold = BatteryMonitor(source="simulator", update_interval=1.0)
+    warm.update_interval = 1.0
+    cold.update_interval = 1.0
     warm._soc = 50.0
     cold._soc = 50.0
+    _sync_remaining_ah_to_soc(warm)
+    _sync_remaining_ah_to_soc(cold)
     warm._temperature = 25.0
     cold._temperature = 5.0
 
@@ -51,6 +65,8 @@ def test_high_temperature_voltage_is_lower():
     hot = BatteryMonitor(source="simulator", update_interval=0)
     warm._soc = 50.0
     hot._soc = 50.0
+    _sync_remaining_ah_to_soc(warm)
+    _sync_remaining_ah_to_soc(hot)
     warm._temperature = 25.0
     hot._temperature = 40.0
 
