@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import ttk
 
-from battery import BatteryMonitor
+from battery_simulator import BatteryMonitor
 
 #简单界面交互窗口，
 class BatteryUI:
@@ -58,8 +58,9 @@ class BatteryUI:
 
     def _schedule_update(self) -> None:
         self._update_status()
-        # 500 ms update interval for UI
-        self.root.after(500, self._schedule_update)
+        step_s = float(self.monitor.update_interval)
+        delay_ms = int(max(round(step_s * 1000.0), 50))
+        self.root.after(delay_ms, self._schedule_update)
 
     def _update_status(self) -> None:
         status = self.monitor.get_status()

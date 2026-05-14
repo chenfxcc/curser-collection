@@ -6,6 +6,14 @@ from datetime import datetime
 import math
 from typing import Any, Dict, Optional
 
+# 配置/日志与脚本同目录，避免从其它工作目录启动时误读 cwd 下的文件
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _resolve_module_path(rel_or_abs: str) -> str:
+    return rel_or_abs if os.path.isabs(rel_or_abs) else os.path.join(_MODULE_DIR, rel_or_abs)
+
+
 class BatteryMonitor:
     """Battery monitering module, simulates or reads real battery data."""
     def __init__(self, source="simulator", update_interval=0.1):
@@ -44,8 +52,7 @@ class BatteryMonitor:
 
         self._stop_requested = False
         self._monitor_thread: Optional[threading.Thread] = None
-       #TODO: start monitoring thread
-    
+
     def _monitor_loop(self):
         while not self._stop_requested:
             if self.source == "simulator":
@@ -53,11 +60,11 @@ class BatteryMonitor:
             else:
                 self._read_from_bms()
             self._check_alarms()
-            threading.Event().wait(self.update_interval)#在后台线程中添加检查，保证每次数据更新都会执行告警逻辑
+            threading.Event().wait(self.update_interval)
     
 
     def _log_data(self):
-        filename = "battery_log.csv"
+        filename = _resolve_module_path("battery_log.csv")
         with open(filename, mode="a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow([
@@ -68,7 +75,7 @@ class BatteryMonitor:
                 self._temperature,
             ])
 
-    def load_config(self, path: str = "config.yaml") -> Dict[str, Any]:
+    def load_config(self, path: str = "battery_config.yaml") -> Dict[str, Any]:
         """Load config from config.yaml; create defaults if missing.
 
         Supported keys (all optional):
@@ -77,7 +84,10 @@ class BatteryMonitor:
           - nominal_capacity_ah: float
           - ambient_temperature: float °C
           - voltage_curve: {v_full, v_plateau_hi, v_plateau_lo, v_empty}
+
+        Path is resolved relative to this module file unless ``path`` is absolute.
         """
+        path = _resolve_module_path(path)
         default_config: Dict[str, Any] = {
             "source": self.source,
             "update_interval": float(self.update_interval),
@@ -161,7 +171,6 @@ class BatteryMonitor:
 
         root: Dict[str, Any] = {}
         current_map: Optional[Dict[str, Any]] = None
-        current_key: Optional[str] = None
 
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -185,11 +194,9 @@ class BatteryMonitor:
                         m: Dict[str, Any] = {}
                         root[k] = m
                         current_map = m
-                        current_key = k
                     else:
                         root[k] = _coerce(v)
                         current_map = None
-                        current_key = None
 
             return root
         except Exception:
@@ -297,8 +304,6 @@ class BatteryMonitor:
         # 90%-20%：平台期几乎不变（仅轻微下滑）
         # 20%-0%：电压快速下降
         #
-        # 这里用平滑插值（smoothstep）避免分段处出现“折线感”
-        # 该平滑函数只在这个方法里面用，在内部可以清楚看到他的作用域
         def _smoothstep01(t: float) -> float:
             t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
             return t * t * (3.0 - 2.0 * t)
@@ -346,24 +351,20 @@ class BatteryMonitor:
         voltage += random.uniform(-0.02, 0.02)
         voltage -= 0.03 * (soc_drop / 1.0)
 
-        # 电压下限保护（避免噪声造成低于空载电压）
         self._voltage = round(max(v_empty, voltage), 2)
 
-        # 返回最新状态
         self._log_data()
         return self._soc, self._voltage, self._soh
-        
-        #TODO: implement
 
     def _read_from_bms(self):
-        """Read real battery data from the BMS(placeholder)."""
-        #TODO: implement
+        """Read real battery data from the BMS (placeholder)."""
+        pass
 
-#天际一个主函数供客户进行交互，输入 s 查看当前状态， 输入 q 退出
+
 def main() -> None:
     monitor = BatteryMonitor()
     monitor.start_monitoring()
-    print("BatteryMonitor started. Type 's' to show status, 'q' to quit.")
+    print(f"Running (step {monitor.update_interval}s). Commands: s = status, q = quit.")
     try:
         while True:
             cmd = input("> ").strip().lower()
