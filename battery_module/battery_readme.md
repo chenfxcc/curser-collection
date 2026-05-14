@@ -15,7 +15,7 @@
 
 # 3 系统架构图
 
-battery_module/BatterySimulator系统架构图.png
+battery_module/architecture.png
 ---
 
 # 4 功能模块
